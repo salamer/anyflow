@@ -1,16 +1,16 @@
 use async_trait::async_trait;
 use futures::future::join_all;
 use futures::future::FutureExt;
-use futures::future::Shared;
+
 
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::any::Any;
-use std::cell::Cell;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use std::fs;
-use std::pin::Pin;
+
+
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -161,10 +161,10 @@ impl DAG {
     }
 
     fn init(&mut self, conf_content: &str) -> Result<(), String> {
-        let dag_config: DAGConfig = serde_json::from_str(&conf_content).unwrap();
+        let dag_config: DAGConfig = serde_json::from_str(conf_content).unwrap();
 
-        let mut prev_tmp: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut next_tmp: HashMap<String, HashSet<String>> = HashMap::new();
+        let _prev_tmp: HashMap<String, HashSet<String>> = HashMap::new();
+        let _next_tmp: HashMap<String, HashSet<String>> = HashMap::new();
 
         for node_config in dag_config.nodes.iter() {
             self.nodes.insert(
@@ -213,7 +213,7 @@ impl DAG {
 
         let mut dag_futures = HashMap::new();
 
-        self.nodes.iter().for_each(|(node_name, node)| {
+        self.nodes.iter().for_each(|(node_name, _node)| {
             let entry = async { NodeResult::new() };
             dag_futures.insert(node_name.clone(), entry.boxed().shared());
         });
