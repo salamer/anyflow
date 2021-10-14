@@ -10,6 +10,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 
 use std::sync::Arc;
+use futures_timer::Delay;
+use futures::select;
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub enum NodeResult {
@@ -129,6 +132,13 @@ pub trait AsyncNode {
     }
 
     fn failure_cb<E: Send + Sync>(
+        graph_args: Arc<E>,
+        input: Arc<NodeResult>,
+        params: Arc<Self::Params>,
+    ) {
+    }
+
+    fn timeout_cb<E: Send + Sync>(
         graph_args: Arc<E>,
         input: Arc<NodeResult>,
         params: Arc<Self::Params>,
@@ -259,14 +269,22 @@ impl DAG {
                         Arc::new(params),
                     );
 
-                    let val = ANode::handle::<T>(
+                    let task = ANode::handle::<T>(
                         &arg_ptr,
                         Arc::new(x.iter().fold(NodeResult::new(), |a, b| a.merge(b))),
                         Arc::new(params),
-                    )
-                    .await;
-                    ANode::post::<i32, T>(&arg_ptr, &val, Arc::new(params), pre_result);
-                    val
+                    );
+                    let timeout_constraint = Delay::new(Duration::from_secs(3));
+
+                    future::select(task, timeout_constraint).then(|either| {
+                        match either {
+                            Either::Left((x, b)) => b.map(move |y| (x, y)).left_future(),
+                            Either::Right((y, a)) => a.map(move |x| (x, y)).right_future(),
+                        }
+                    })
+
+                    ANode::post::<i32, T>(&arg_ptr, &res, Arc::new(params), pre_result);
+                    res
                 })
                 .boxed()
                 .shared();
