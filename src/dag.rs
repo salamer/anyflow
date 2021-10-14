@@ -2,14 +2,12 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use futures::future::FutureExt;
 
-
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::any::Any;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-
 
 use std::sync::Arc;
 
@@ -26,7 +24,7 @@ impl NodeResult {
     pub fn new() -> NodeResult {
         NodeResult::Ok(HashMap::new())
     }
-    pub fn safe_get<T: Any + Debug + Clone>(&self, key: &str) -> Option<T> {
+    pub fn get<T: Any + Debug + Clone>(&self, key: &str) -> Option<T> {
         match self {
             NodeResult::Ok(kv) => match kv.get(&key.to_string()) {
                 Some(val) => val.downcast_ref::<T>().cloned(),
@@ -35,7 +33,7 @@ impl NodeResult {
             NodeResult::Err(_) => None,
         }
     }
-    pub fn safe_set<T: Any + Debug + Clone + std::marker::Send>(
+    pub fn set<T: Any + Debug + Clone + std::marker::Send>(
         &self,
         key: &str,
         val: &T,
@@ -63,9 +61,7 @@ impl NodeResult {
         }
     }
 
-    fn safe_get_vec<T: Any + Debug + Clone + std::marker::Send>(
-        &self,
-    ) -> Option<HashMap<String, T>> {
+    fn get_map<T: Any + Debug + Clone + std::marker::Send>(&self) -> Option<HashMap<String, T>> {
         match self {
             NodeResult::Ok(kv) => {
                 let mut ret = HashMap::new();
@@ -110,11 +106,34 @@ pub struct DAG {
 #[async_trait]
 pub trait AsyncNode {
     type Params;
-    async fn handle<E: Send + Sync>(
-        graph_args: Arc<E>,
+    async fn handle<'a, E: Send + Sync>(
+        graph_args: &'a Arc<E>,
         input: Arc<NodeResult>,
         params: Arc<Self::Params>,
     ) -> NodeResult;
+
+    fn pre<'a, T: Default, E: Send + Sync>(
+        graph_args: &'a Arc<E>,
+        input: &'a NodeResult,
+        params: Arc<Self::Params>,
+    ) -> T {
+        T::default()
+    }
+
+    fn post<'a, T: Default, E: Send + Sync>(
+        graph_args: &'a Arc<E>,
+        input: &'a NodeResult,
+        params: Arc<Self::Params>,
+        pre_result: T,
+    ) {
+    }
+
+    fn failure_cb<E: Send + Sync>(
+        graph_args: Arc<E>,
+        input: Arc<NodeResult>,
+        params: Arc<Self::Params>,
+    ) {
+    }
 }
 
 #[derive(Deserialize, Default, Copy, Clone, Debug)]
@@ -136,13 +155,13 @@ impl ANode {
 #[async_trait]
 impl AsyncNode for ANode {
     type Params = AnyParams;
-    async fn handle<E: Send + Sync>(
-        _graph_args: Arc<E>,
+    async fn handle<'a, E: Send + Sync>(
+        graph_args: &'a Arc<E>,
         input: Arc<NodeResult>,
         params: Arc<AnyParams>,
     ) -> NodeResult {
         println!("val {:?} {:?}", params, input);
-        return NodeResult::new().safe_set(&params.val.to_string(), &params.val.to_string());
+        return NodeResult::new().set(&params.val.to_string(), &params.val.to_string());
     }
 }
 
@@ -234,12 +253,20 @@ impl DAG {
                 .then(|x| async move {
                     let params: <ANode as AsyncNode>::Params =
                         serde_json::from_str(params_ptr.get()).unwrap();
-                    ANode::handle::<T>(
-                        arg_ptr,
+                    let pre_result = ANode::pre::<i32, T>(
+                        &arg_ptr,
+                        &x.iter().fold(NodeResult::new(), |a, b| a.merge(b)),
+                        Arc::new(params),
+                    );
+
+                    let val = ANode::handle::<T>(
+                        &arg_ptr,
                         Arc::new(x.iter().fold(NodeResult::new(), |a, b| a.merge(b))),
                         Arc::new(params),
                     )
-                    .await
+                    .await;
+                    ANode::post::<i32, T>(&arg_ptr, &val, Arc::new(params), pre_result);
+                    val
                 })
                 .boxed()
                 .shared();
