@@ -9,9 +9,10 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 
-use std::sync::Arc;
-use futures_timer::Delay;
+use futures::future::{Either, Future};
 use futures::select;
+use futures_timer::Delay;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -269,19 +270,12 @@ impl DAG {
                         Arc::new(params),
                     );
 
-                    let task = ANode::handle::<T>(
+                    let res = ANode::handle::<T>(
                         &arg_ptr,
                         Arc::new(x.iter().fold(NodeResult::new(), |a, b| a.merge(b))),
                         Arc::new(params),
-                    );
-                    let timeout_constraint = Delay::new(Duration::from_secs(3));
-
-                    future::select(task, timeout_constraint).then(|either| {
-                        match either {
-                            Either::Left((x, b)) => b.map(move |y| (x, y)).left_future(),
-                            Either::Right((y, a)) => a.map(move |x| (x, y)).right_future(),
-                        }
-                    })
+                    )
+                    .await;
 
                     ANode::post::<i32, T>(&arg_ptr, &res, Arc::new(params), pre_result);
                     res
