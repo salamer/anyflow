@@ -1,18 +1,17 @@
 use async_trait::async_trait;
 use futures::future::join_all;
 use futures::future::FutureExt;
-
-use serde::Deserialize;
-use serde_json::value::RawValue;
-use std::any::Any;
-
 use futures::future::{Either, Future};
 use futures::select;
 use futures_timer::Delay;
+use serde::Deserialize;
+use serde_json::value::RawValue;
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use macros::*;
 
 #[derive(Clone, Debug)]
 pub enum NodeResult {
@@ -103,15 +102,19 @@ pub struct DAGNode {
 }
 
 #[async_trait]
-pub trait AsyncNode {
+pub trait AsyncNode: Copy {
     type Params;
     async fn handle<'a, E: Send + Sync>(
+        self,
         graph_args: &'a Arc<E>,
         input: Arc<NodeResult>,
         params: Arc<Self::Params>,
     ) -> NodeResult;
 
+    fn deserialize(self, params_ptr: &Box<RawValue>) -> Self::Params;
+
     fn pre<'a, T: Default, E: Send + Sync>(
+        self,
         graph_args: &'a Arc<E>,
         input: &'a NodeResult,
         params: Arc<Self::Params>,
@@ -119,6 +122,7 @@ pub trait AsyncNode {
     }
 
     fn post<'a, T: Default, E: Send + Sync>(
+        self,
         graph_args: &'a Arc<E>,
         input: &'a NodeResult,
         params: Arc<Self::Params>,
@@ -126,6 +130,7 @@ pub trait AsyncNode {
     }
 
     fn failure_cb<E: Send + Sync>(
+        self,
         graph_args: Arc<E>,
         input: Arc<NodeResult>,
         params: Arc<Self::Params>,
@@ -133,6 +138,7 @@ pub trait AsyncNode {
     }
 
     fn timeout_cb<E: Send + Sync>(
+        self,
         graph_args: Arc<E>,
         input: Arc<NodeResult>,
         params: Arc<Self::Params>,
@@ -147,7 +153,8 @@ struct AnyParams {
 
 struct AnyArgs {}
 
-#[derive(Default)]
+
+#[derive(Default, Debug, Copy, Clone, AnyFlowNode)]
 struct ANode {}
 
 impl ANode {
@@ -160,6 +167,7 @@ impl ANode {
 impl AsyncNode for ANode {
     type Params = AnyParams;
     async fn handle<'a, E: Send + Sync>(
+        self,
         graph_args: &'a Arc<E>,
         input: Arc<NodeResult>,
         params: Arc<AnyParams>,
@@ -167,9 +175,13 @@ impl AsyncNode for ANode {
         println!("val {:?} {:?}", params, input);
         return NodeResult::new().set(&params.val.to_string(), &params.val.to_string());
     }
+
+    fn deserialize(self, params_ptr: &Box<RawValue>) -> AnyParams {
+        serde_json::from_str(params_ptr.get()).unwrap()
+    }
 }
 
-fn make_node(node_name: &str) -> impl Sized + AsyncNode {
+fn make_node(node_name: &str) -> impl Sized + AsyncNode<Params = AnyParams> {
     match node_name {
         "ANode" => ANode::default(),
         _Default => ANode::default(),
@@ -269,28 +281,20 @@ impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
 
             let arg_ptr = Arc::clone(&args);
             let params_ptr = node.node_config.params.clone();
-            let node_instance = make_node(&node_name);
+            let node_instance = Arc::new(make_node(&node_name));
             let pre_fn = Arc::clone(&self.pre);
             let post_fn = Arc::clone(&self.post);
             *dag_futures.get_mut(node_name).unwrap() = join_all(deps)
                 .then(|x| async move {
-                    node_instance;
-
-                    let params: <ANode as AsyncNode>::Params =
-                        serde_json::from_str(params_ptr.get()).unwrap();
+                    let params = node_instance.deserialize(&params_ptr);
                     let prev_res = Arc::new(x.iter().fold(NodeResult::new(), |a, b| a.merge(b)));
-                    ANode::pre::<i32, E>(
-                        &arg_ptr,
-                        &x.iter().fold(NodeResult::new(), |a, b| a.merge(b)),
-                        Arc::new(params),
-                    );
                     // TODO: timeout
                     let pre_result: T = pre_fn(&arg_ptr, &prev_res);
-                    let res =
-                        ANode::handle::<E>(&arg_ptr, prev_res.clone(), Arc::new(params)).await;
+                    let res = node_instance
+                        .handle::<E>(&arg_ptr, prev_res.clone(), Arc::new(params))
+                        .await;
                     post_fn(&arg_ptr, &prev_res, &pre_result);
 
-                    ANode::post::<i32, E>(&arg_ptr, &res, Arc::new(params));
                     res
                 })
                 .boxed()
