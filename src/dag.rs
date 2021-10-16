@@ -3,7 +3,9 @@ use futures::future::join_all;
 use futures::future::FutureExt;
 use futures::future::{Either, Future};
 use futures::select;
+use futures::stream::FuturesUnordered;
 use futures_timer::Delay;
+use macros::*;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::any::Any;
@@ -11,7 +13,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use macros::*;
 
 #[derive(Clone, Debug)]
 pub enum NodeResult {
@@ -102,22 +103,37 @@ pub struct DAGNode {
 }
 
 #[async_trait]
+pub trait AsyncNodeWrapper: Copy {
+    // type Params;
+    async fn handle_wrapper<'a, E: Send + Sync>(
+        self,
+        graph_args: &'a Arc<E>,
+        input: Arc<NodeResult>,
+        // params: Arc<Self::Params>,
+    ) -> NodeResult;
+
+    // fn make_instance(&self) -> Self;
+}
+
+#[async_trait]
 pub trait AsyncNode: Copy {
-    type Params;
+    // type Params;
     async fn handle<'a, E: Send + Sync>(
         self,
         graph_args: &'a Arc<E>,
         input: Arc<NodeResult>,
-        params: Arc<Self::Params>,
+        // params: Arc<Self::Params>,
     ) -> NodeResult;
 
-    fn deserialize(self, params_ptr: &Box<RawValue>) -> Self::Params;
+    // fn deserialize(self, params_ptr: &Box<RawValue>) -> Self::Params;
+
+    fn name() -> &'static str;
 
     fn pre<'a, T: Default, E: Send + Sync>(
         self,
         graph_args: &'a Arc<E>,
         input: &'a NodeResult,
-        params: Arc<Self::Params>,
+        // params: Arc<Self::Params>,
     ) {
     }
 
@@ -125,7 +141,7 @@ pub trait AsyncNode: Copy {
         self,
         graph_args: &'a Arc<E>,
         input: &'a NodeResult,
-        params: Arc<Self::Params>,
+        // params: Arc<Self::Params>,
     ) {
     }
 
@@ -133,7 +149,7 @@ pub trait AsyncNode: Copy {
         self,
         graph_args: Arc<E>,
         input: Arc<NodeResult>,
-        params: Arc<Self::Params>,
+        // params: Arc<Self::Params>,
     ) {
     }
 
@@ -141,9 +157,11 @@ pub trait AsyncNode: Copy {
         self,
         graph_args: Arc<E>,
         input: Arc<NodeResult>,
-        params: Arc<Self::Params>,
+        // params: Arc<Self::Params>,
     ) {
     }
+
+    // fn make_instance(&self) -> Self;
 }
 
 #[derive(Deserialize, Default, Copy, Clone, Debug)]
@@ -153,8 +171,8 @@ struct AnyParams {
 
 struct AnyArgs {}
 
-
-#[derive(Default, Debug, Copy, Clone, AnyFlowNode)]
+#[AnyFlowNode(AnyParams)]
+#[derive(Default, Copy, Clone, Debug)]
 struct ANode {}
 
 impl ANode {
@@ -164,24 +182,18 @@ impl ANode {
 }
 
 #[async_trait]
-impl AsyncNode for ANode {
-    type Params = AnyParams;
-    async fn handle<'a, E: Send + Sync>(
+impl AsyncNodeWrapper for ANode {
+    async fn handle_wrapper<'a, E: Send + Sync>(
         self,
         graph_args: &'a Arc<E>,
         input: Arc<NodeResult>,
-        params: Arc<AnyParams>,
+        // params: Arc<AnyParams>,
     ) -> NodeResult {
-        println!("val {:?} {:?}", params, input);
-        return NodeResult::new().set(&params.val.to_string(), &params.val.to_string());
-    }
-
-    fn deserialize(self, params_ptr: &Box<RawValue>) -> AnyParams {
-        serde_json::from_str(params_ptr.get()).unwrap()
+        return NodeResult::new();
     }
 }
 
-fn make_node(node_name: &str) -> impl Sized + AsyncNode<Params = AnyParams> {
+fn make_node(node_name: &str) -> impl Sized + AsyncNode {
     match node_name {
         "ANode" => ANode::default(),
         _Default => ANode::default(),
@@ -197,6 +209,8 @@ pub struct DAG<T: Default + Sync + Send, E: Send + Sync> {
     post: Arc<dyn for<'a> Fn(&'a Arc<E>, &'a NodeResult, &T) + Send + Sync>,
     timeout_cb: Arc<dyn for<'a> Fn() + Send + Sync>,
     failure_cb: Arc<dyn for<'a> Fn(&'a NodeResult)>,
+    // register
+    // node_mapping: HashMap<String, Box<AsyncNode>>,
 }
 
 impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
@@ -208,6 +222,7 @@ impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
             post: Arc::new(|a, b, c| {}),
             timeout_cb: Arc::new(|| {}),
             failure_cb: Arc::new(|a| {}),
+            // node_mapping: HashMap::new(),
         }
     }
 
@@ -216,6 +231,8 @@ impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
 
         let _prev_tmp: HashMap<String, HashSet<String>> = HashMap::new();
         let _next_tmp: HashMap<String, HashSet<String>> = HashMap::new();
+        // let a = Box::new(make_node);
+        // self.make_flow(a);
 
         for node_config in dag_config.nodes.iter() {
             self.nodes.insert(
@@ -279,6 +296,15 @@ impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
                 .map(|dep| dag_futures.get(dep).unwrap().clone())
                 .collect();
 
+            let depss: FuturesUnordered<_> = self
+                .nodes
+                .get(node_name)
+                .unwrap()
+                .prevs
+                .iter()
+                .map(|dep| dag_futures.get(dep).unwrap().clone())
+                .collect();
+
             let arg_ptr = Arc::clone(&args);
             let params_ptr = node.node_config.params.clone();
             let node_instance = Arc::new(make_node(&node_name));
@@ -286,13 +312,11 @@ impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
             let post_fn = Arc::clone(&self.post);
             *dag_futures.get_mut(node_name).unwrap() = join_all(deps)
                 .then(|x| async move {
-                    let params = node_instance.deserialize(&params_ptr);
+                    // let params = node_instance.deserialize(&params_ptr);
                     let prev_res = Arc::new(x.iter().fold(NodeResult::new(), |a, b| a.merge(b)));
                     // TODO: timeout
                     let pre_result: T = pre_fn(&arg_ptr, &prev_res);
-                    let res = node_instance
-                        .handle::<E>(&arg_ptr, prev_res.clone(), Arc::new(params))
-                        .await;
+                    let res = node_instance.handle::<E>(&arg_ptr, prev_res.clone()).await;
                     post_fn(&arg_ptr, &prev_res, &pre_result);
 
                     res
