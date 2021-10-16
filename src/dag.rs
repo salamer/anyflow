@@ -6,13 +6,12 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::any::Any;
 
-use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
-
 use futures::future::{Either, Future};
 use futures::select;
 use futures_timer::Delay;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -103,10 +102,6 @@ pub struct DAGNode {
     nexts: HashSet<String>,
 }
 
-pub struct DAG {
-    nodes: HashMap<String, Box<DAGNode>>,
-}
-
 #[async_trait]
 pub trait AsyncNode {
     type Params;
@@ -120,15 +115,13 @@ pub trait AsyncNode {
         graph_args: &'a Arc<E>,
         input: &'a NodeResult,
         params: Arc<Self::Params>,
-    ) -> T {
-        T::default()
+    ) {
     }
 
     fn post<'a, T: Default, E: Send + Sync>(
         graph_args: &'a Arc<E>,
         input: &'a NodeResult,
         params: Arc<Self::Params>,
-        pre_result: T,
     ) {
     }
 
@@ -176,17 +169,33 @@ impl AsyncNode for ANode {
     }
 }
 
-async fn route(node_name: &str) -> impl Sized + AsyncNode {
+fn make_node(node_name: &str) -> impl Sized + AsyncNode {
     match node_name {
         "ANode" => ANode::default(),
         _Default => ANode::default(),
     }
 }
 
-impl DAG {
-    fn new() -> DAG {
+pub struct DAG<T: Default + Sync + Send, E: Send + Sync> {
+    nodes: HashMap<String, Box<DAGNode>>,
+
+    // global configures
+    timeout: Duration,
+    pre: Arc<dyn for<'a> Fn(&'a Arc<E>, &'a NodeResult) -> T + Send + Sync>,
+    post: Arc<dyn for<'a> Fn(&'a Arc<E>, &'a NodeResult, &T) + Send + Sync>,
+    timeout_cb: Arc<dyn for<'a> Fn() + Send + Sync>,
+    failure_cb: Arc<dyn for<'a> Fn(&'a NodeResult)>,
+}
+
+impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
+    fn new() -> DAG<T, E> {
         DAG {
             nodes: HashMap::new(),
+            timeout: Duration::from_secs(5),
+            pre: Arc::new(|a, b| T::default()),
+            post: Arc::new(|a, b, c| {}),
+            timeout_cb: Arc::new(|| {}),
+            failure_cb: Arc::new(|a| {}),
         }
     }
 
@@ -233,7 +242,7 @@ impl DAG {
         Ok(())
     }
 
-    async fn make_flow<T: Send + Sync>(&self, args: Arc<T>) -> Vec<NodeResult> {
+    async fn make_flow(&self, args: Arc<E>) -> Vec<NodeResult> {
         let leaf_nodes: HashSet<String> = self
             .nodes
             .values()
@@ -260,24 +269,28 @@ impl DAG {
 
             let arg_ptr = Arc::clone(&args);
             let params_ptr = node.node_config.params.clone();
+            let node_instance = make_node(&node_name);
+            let pre_fn = Arc::clone(&self.pre);
+            let post_fn = Arc::clone(&self.post);
             *dag_futures.get_mut(node_name).unwrap() = join_all(deps)
                 .then(|x| async move {
+                    node_instance;
+
                     let params: <ANode as AsyncNode>::Params =
                         serde_json::from_str(params_ptr.get()).unwrap();
-                    let pre_result = ANode::pre::<i32, T>(
+                    let prev_res = Arc::new(x.iter().fold(NodeResult::new(), |a, b| a.merge(b)));
+                    ANode::pre::<i32, E>(
                         &arg_ptr,
                         &x.iter().fold(NodeResult::new(), |a, b| a.merge(b)),
                         Arc::new(params),
                     );
+                    // TODO: timeout
+                    let pre_result: T = pre_fn(&arg_ptr, &prev_res);
+                    let res =
+                        ANode::handle::<E>(&arg_ptr, prev_res.clone(), Arc::new(params)).await;
+                    post_fn(&arg_ptr, &prev_res, &pre_result);
 
-                    let res = ANode::handle::<T>(
-                        &arg_ptr,
-                        Arc::new(x.iter().fold(NodeResult::new(), |a, b| a.merge(b))),
-                        Arc::new(params),
-                    )
-                    .await;
-
-                    ANode::post::<i32, T>(&arg_ptr, &res, Arc::new(params), pre_result);
+                    ANode::post::<i32, E>(&arg_ptr, &res, Arc::new(params));
                     res
                 })
                 .boxed()
