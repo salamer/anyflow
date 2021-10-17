@@ -102,98 +102,8 @@ pub struct DAGNode {
     nexts: HashSet<String>,
 }
 
-#[async_trait]
-pub trait AsyncNodeWrapper: Copy {
-    // type Params;
-    async fn handle_wrapper<'a, E: Send + Sync>(
-        self,
-        graph_args: &'a Arc<E>,
-        input: Arc<NodeResult>,
-        // params: Arc<Self::Params>,
-    ) -> NodeResult;
 
-    // fn make_instance(&self) -> Self;
-}
-
-#[async_trait]
-pub trait AsyncNode: Copy {
-    // type Params;
-    async fn handle<'a, E: Send + Sync>(
-        self,
-        graph_args: &'a Arc<E>,
-        input: Arc<NodeResult>,
-        // params: Arc<Self::Params>,
-    ) -> NodeResult;
-
-    // fn deserialize(self, params_ptr: &Box<RawValue>) -> Self::Params;
-
-    fn name() -> &'static str;
-
-    fn pre<'a, T: Default, E: Send + Sync>(
-        self,
-        graph_args: &'a Arc<E>,
-        input: &'a NodeResult,
-        // params: Arc<Self::Params>,
-    ) {
-    }
-
-    fn post<'a, T: Default, E: Send + Sync>(
-        self,
-        graph_args: &'a Arc<E>,
-        input: &'a NodeResult,
-        // params: Arc<Self::Params>,
-    ) {
-    }
-
-    fn failure_cb<E: Send + Sync>(
-        self,
-        graph_args: Arc<E>,
-        input: Arc<NodeResult>,
-        // params: Arc<Self::Params>,
-    ) {
-    }
-
-    fn timeout_cb<E: Send + Sync>(
-        self,
-        graph_args: Arc<E>,
-        input: Arc<NodeResult>,
-        // params: Arc<Self::Params>,
-    ) {
-    }
-
-    // fn make_instance(&self) -> Self;
-}
-
-#[derive(Deserialize, Default, Copy, Clone, Debug)]
-struct AnyParams {
-    val: i32,
-}
-
-struct AnyArgs {}
-
-#[AnyFlowNode(AnyParams)]
-#[derive(Default, Copy, Clone, Debug)]
-struct ANode {}
-
-impl ANode {
-    fn to_params(_input: &str) -> AnyParams {
-        AnyParams::default()
-    }
-}
-
-#[async_trait]
-impl AsyncNodeWrapper for ANode {
-    async fn handle_wrapper<'a, E: Send + Sync>(
-        self,
-        graph_args: &'a Arc<E>,
-        input: Arc<NodeResult>,
-        // params: Arc<AnyParams>,
-    ) -> NodeResult {
-        return NodeResult::new();
-    }
-}
-
-async fn handle_wrapper<'a, E: Send + Sync>(
+fn handle_wrapper<'a, E: Send + Sync>(
     graph_args: &'a Arc<E>,
     input: Arc<NodeResult>,
     // params: Arc<AnyParams>,
@@ -201,14 +111,7 @@ async fn handle_wrapper<'a, E: Send + Sync>(
     return NodeResult::new();
 }
 
-fn make_node(node_name: &str) -> impl Sized + AsyncNode {
-    match node_name {
-        "ANode" => ANode::default(),
-        _Default => ANode::default(),
-    }
-}
-
-pub struct DAG<T: Default + Sync + Send, E: Send + Sync> {
+pub struct Flow<T: Default + Sync + Send, E: Send + Sync> {
     nodes: HashMap<String, Box<DAGNode>>,
 
     // global configures
@@ -223,12 +126,11 @@ pub struct DAG<T: Default + Sync + Send, E: Send + Sync> {
         String,
         Arc<dyn for<'a> Fn(&'a Arc<E>, Arc<NodeResult>) -> NodeResult + Sync + Send>,
     >,
-    // node_mapping: HashMap<String, Box<Fn()>>
 }
 
-impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
-    fn new() -> DAG<T, E> {
-        DAG {
+impl<T: Default + Send + Sync, E: Send + Sync> Flow<T, E> {
+    fn new() -> Flow<T, E> {
+        Flow {
             nodes: HashMap::new(),
             timeout: Duration::from_secs(5),
             pre: Arc::new(|a, b| T::default()),
@@ -239,14 +141,16 @@ impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
         }
     }
 
+    fn register(&mut self, node_name: &str, handle: &(dyn for<'a> Fn(&'a Arc<E>, Arc<NodeResult>) -> NodeResult + Sync + Send)) {
+
+    }
+
+    fn registers(&mut self, nodes: &[(&str, &(dyn for<'a> Fn(&'a Arc<E>, Arc<NodeResult>) -> NodeResult + Sync + Send))]) {
+
+    }
+
     fn init(&mut self, conf_content: &str) -> Result<(), String> {
         let dag_config: DAGConfig = serde_json::from_str(conf_content).unwrap();
-
-        let _prev_tmp: HashMap<String, HashSet<String>> = HashMap::new();
-        let _next_tmp: HashMap<String, HashSet<String>> = HashMap::new();
-        // let a = Box::new(make_node);
-        // self.make_flow(a);
-
         for node_config in dag_config.nodes.iter() {
             self.nodes.insert(
                 node_config.name.clone(),
@@ -320,18 +224,18 @@ impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
 
             let arg_ptr = Arc::clone(&args);
             let params_ptr = node.node_config.params.clone();
-            let node_instance = Arc::new(make_node(&node_name));
             let pre_fn = Arc::clone(&self.pre);
             let post_fn = Arc::clone(&self.post);
             let handle_fn = Arc::clone(self.node_mapping.get(&node.node_config.node).unwrap());
-            // handle_fn();
             *dag_futures.get_mut(node_name).unwrap() = join_all(deps)
                 .then(|x| async move {
                     // let params = node_instance.deserialize(&params_ptr);
                     let prev_res = Arc::new(x.iter().fold(NodeResult::new(), |a, b| a.merge(b)));
                     // TODO: timeout
                     let pre_result: T = pre_fn(&arg_ptr, &prev_res);
-                    let res = handle_fn(&arg_ptr, prev_res.clone());
+                    let res = async {
+                        handle_fn(&arg_ptr, prev_res.clone())
+                    }.await;
                     post_fn(&arg_ptr, &prev_res, &pre_result);
                     res
                 })
@@ -348,4 +252,9 @@ impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
         }
         .await
     }
+}
+
+
+fn demo() {
+    let dag = Flow::<i32, i32>::new().register("handle_wrapper", &handle_wrapper);
 }

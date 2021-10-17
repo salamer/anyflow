@@ -43,8 +43,7 @@ pub fn AnyFlowNode(params: TokenStream, code: TokenStream) -> TokenStream {
     x.parse().expect("Generated invalid tokens")
 }
 
-
-macro_rules! add{
+macro_rules! resgiter{
     // first arm in case of single argument and last remaining variable/number
        ($a:expr)=>{
            $a
@@ -55,7 +54,7 @@ macro_rules! add{
                $a+$b
            }
        };
-   // add the number and the result of remaining arguments 
+   // add the number and the result of remaining arguments
        ($a:expr,$($b:tt)*)=>{
           {
               $a+add!($($b)*)
@@ -63,6 +62,6 @@ macro_rules! add{
        }
    }
 
-   fn demo() {
-       add!(1,2);
-   }
+fn demo() {
+    resgiter!(1, 2);
+}
