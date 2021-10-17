@@ -1,17 +1,12 @@
-use async_trait::async_trait;
 use futures::future::join_all;
 use futures::future::FutureExt;
-use futures::future::{Either, Future};
-use futures::select;
 use futures::stream::FuturesUnordered;
-use futures_timer::Delay;
-use macros::*;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -102,13 +97,12 @@ pub struct DAGNode {
     nexts: HashSet<String>,
 }
 
-
 fn handle_wrapper<'a, E: Send + Sync>(
-    graph_args: &'a Arc<E>,
-    input: Arc<NodeResult>,
+    _graph_args: &'a Arc<E>,
+    _input: Arc<NodeResult>,
     // params: Arc<AnyParams>,
 ) -> NodeResult {
-    return NodeResult::new();
+    NodeResult::new()
 }
 
 pub struct Flow<T: Default + Sync + Send, E: Send + Sync> {
@@ -133,20 +127,28 @@ impl<T: Default + Send + Sync, E: Send + Sync> Flow<T, E> {
         Flow {
             nodes: HashMap::new(),
             timeout: Duration::from_secs(5),
-            pre: Arc::new(|a, b| T::default()),
-            post: Arc::new(|a, b, c| {}),
+            pre: Arc::new(|_a, _b| T::default()),
+            post: Arc::new(|_a, _b, _c| {}),
             timeout_cb: Arc::new(|| {}),
-            failure_cb: Arc::new(|a| {}),
+            failure_cb: Arc::new(|_a| {}),
             node_mapping: HashMap::new(),
         }
     }
 
-    fn register(&mut self, node_name: &str, handle: &(dyn for<'a> Fn(&'a Arc<E>, Arc<NodeResult>) -> NodeResult + Sync + Send)) {
-
+    fn register(
+        &mut self,
+        _node_name: &str,
+        _handle: &(dyn for<'a> Fn(&'a Arc<E>, Arc<NodeResult>) -> NodeResult + Sync + Send),
+    ) {
     }
 
-    fn registers(&mut self, nodes: &[(&str, &(dyn for<'a> Fn(&'a Arc<E>, Arc<NodeResult>) -> NodeResult + Sync + Send))]) {
-
+    fn registers(
+        &mut self,
+        _nodes: &[(
+            &str,
+            &(dyn for<'a> Fn(&'a Arc<E>, Arc<NodeResult>) -> NodeResult + Sync + Send),
+        )],
+    ) {
     }
 
     fn init(&mut self, conf_content: &str) -> Result<(), String> {
@@ -213,7 +215,7 @@ impl<T: Default + Send + Sync, E: Send + Sync> Flow<T, E> {
                 .map(|dep| dag_futures.get(dep).unwrap().clone())
                 .collect();
 
-            let depss: FuturesUnordered<_> = self
+            let _depss: FuturesUnordered<_> = self
                 .nodes
                 .get(node_name)
                 .unwrap()
@@ -223,7 +225,7 @@ impl<T: Default + Send + Sync, E: Send + Sync> Flow<T, E> {
                 .collect();
 
             let arg_ptr = Arc::clone(&args);
-            let params_ptr = node.node_config.params.clone();
+            let _params_ptr = node.node_config.params.clone();
             let pre_fn = Arc::clone(&self.pre);
             let post_fn = Arc::clone(&self.post);
             let handle_fn = Arc::clone(self.node_mapping.get(&node.node_config.node).unwrap());
@@ -233,9 +235,7 @@ impl<T: Default + Send + Sync, E: Send + Sync> Flow<T, E> {
                     let prev_res = Arc::new(x.iter().fold(NodeResult::new(), |a, b| a.merge(b)));
                     // TODO: timeout
                     let pre_result: T = pre_fn(&arg_ptr, &prev_res);
-                    let res = async {
-                        handle_fn(&arg_ptr, prev_res.clone())
-                    }.await;
+                    let res = async { handle_fn(&arg_ptr, prev_res.clone()) }.await;
                     post_fn(&arg_ptr, &prev_res, &pre_result);
                     res
                 })
@@ -254,7 +254,6 @@ impl<T: Default + Send + Sync, E: Send + Sync> Flow<T, E> {
     }
 }
 
-
 fn demo() {
-    let dag = Flow::<i32, i32>::new().register("handle_wrapper", &handle_wrapper);
+    let _dag = Flow::<i32, i32>::new().register("handle_wrapper", &handle_wrapper);
 }
