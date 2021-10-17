@@ -193,6 +193,14 @@ impl AsyncNodeWrapper for ANode {
     }
 }
 
+async fn handle_wrapper<'a, E: Send + Sync>(
+    graph_args: &'a Arc<E>,
+    input: Arc<NodeResult>,
+    // params: Arc<AnyParams>,
+) -> NodeResult {
+    return NodeResult::new();
+}
+
 fn make_node(node_name: &str) -> impl Sized + AsyncNode {
     match node_name {
         "ANode" => ANode::default(),
@@ -209,8 +217,13 @@ pub struct DAG<T: Default + Sync + Send, E: Send + Sync> {
     post: Arc<dyn for<'a> Fn(&'a Arc<E>, &'a NodeResult, &T) + Send + Sync>,
     timeout_cb: Arc<dyn for<'a> Fn() + Send + Sync>,
     failure_cb: Arc<dyn for<'a> Fn(&'a NodeResult)>,
+
     // register
-    // node_mapping: HashMap<String, Box<AsyncNode>>,
+    node_mapping: HashMap<
+        String,
+        Arc<dyn for<'a> Fn(&'a Arc<E>, Arc<NodeResult>) -> NodeResult + Sync + Send>,
+    >,
+    // node_mapping: HashMap<String, Box<Fn()>>
 }
 
 impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
@@ -222,7 +235,7 @@ impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
             post: Arc::new(|a, b, c| {}),
             timeout_cb: Arc::new(|| {}),
             failure_cb: Arc::new(|a| {}),
-            // node_mapping: HashMap::new(),
+            node_mapping: HashMap::new(),
         }
     }
 
@@ -310,15 +323,16 @@ impl<T: Default + Send + Sync, E: Send + Sync> DAG<T, E> {
             let node_instance = Arc::new(make_node(&node_name));
             let pre_fn = Arc::clone(&self.pre);
             let post_fn = Arc::clone(&self.post);
+            let handle_fn = Arc::clone(self.node_mapping.get(&node.node_config.node).unwrap());
+            // handle_fn();
             *dag_futures.get_mut(node_name).unwrap() = join_all(deps)
                 .then(|x| async move {
                     // let params = node_instance.deserialize(&params_ptr);
                     let prev_res = Arc::new(x.iter().fold(NodeResult::new(), |a, b| a.merge(b)));
                     // TODO: timeout
                     let pre_result: T = pre_fn(&arg_ptr, &prev_res);
-                    let res = node_instance.handle::<E>(&arg_ptr, prev_res.clone()).await;
+                    let res = handle_fn(&arg_ptr, prev_res.clone());
                     post_fn(&arg_ptr, &prev_res, &pre_result);
-
                     res
                 })
                 .boxed()
