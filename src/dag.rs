@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::timeout;
 
 #[derive(Clone, Debug)]
 pub enum NodeResult {
@@ -199,12 +200,14 @@ impl<T: Default + Send + Sync, E: Send + Sync> Flow<T, E> {
             .map(|node| node.node_config.name.clone())
             .collect();
 
-        let mut dag_futures = HashMap::new();
-
-        self.nodes.iter().for_each(|(node_name, _node)| {
-            let entry = async { NodeResult::new() };
-            dag_futures.insert(node_name.clone(), entry.boxed().shared());
-        });
+        let mut dag_futures: HashMap<_, _> = self
+            .nodes
+            .iter()
+            .map(|(node_name, _)| {
+                let entry = async { NodeResult::new() };
+                (node_name.clone(), entry.boxed().shared())
+            })
+            .collect();
 
         for (node_name, node) in self.nodes.iter() {
             let mut deps: FuturesUnordered<_> = self
@@ -228,9 +231,15 @@ impl<T: Default + Send + Sync, E: Send + Sync> Flow<T, E> {
                 }
                 // let params = node_instance.deserialize(&params_ptr);
                 let prev_res = Arc::new(results.iter().fold(NodeResult::new(), |a, b| a.merge(b)));
-                // TODO: timeout
                 let pre_result: T = pre_fn(&arg_ptr, &prev_res);
-                let res = async { handle_fn(&arg_ptr, prev_res.clone()) }.await;
+                let res = match timeout(Duration::from_secs(1), async {
+                    handle_fn(&arg_ptr, prev_res.clone())
+                })
+                .await
+                {
+                    Err(_) => NodeResult::Err("timeout"),
+                    Ok(val) => val,
+                };
                 post_fn(&arg_ptr, &prev_res, &pre_result);
                 res
             }
